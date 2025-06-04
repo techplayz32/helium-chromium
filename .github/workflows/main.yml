@@ -37,6 +37,15 @@ jobs:
           ./utils/downloads.py unpack -c build/download_cache -i downloads.ini -- build/src
           ./utils/downloads.py unpack -c build/download_cache -i extras.ini -- build/src
 
+      - name: Synchronize additional Chromium Dependencies (gclient sync)
+        # Run gclient sync inside the build/src directory to ensure all dependencies,
+        # including the Rust toolchain, are correctly fetched.
+        # --no-history flag helps save disk space and time by not fetching full git history.
+        run: |
+          cd build/src
+          gclient sync --no-history
+          cd - # Go back to the helium-chromium root directory
+
       - name: Prune binaries
         # Removes unnecessary binaries from the Chromium source tree
         run: ./utils/prune_binaries.py build/src pruning.list
