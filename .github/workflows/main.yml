@@ -1,0 +1,83 @@
+name: Build Helium-Chromium
+
+on:
+  push:
+    branches:
+      - main # Trigger the workflow on pushes to the 'main' branch
+      - master # Also trigger on 'master' if that's your primary branch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest # Use the latest Ubuntu runner
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # Action to checkout your helium-chromium repository
+
+      - name: Install Essential Build Tools and Python Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git python3-pip build-essential curl lsb-release
+          # Install Python dependencies required by the utility scripts
+          pip3 install requests # Often needed for download scripts
+
+      - name: Fetch depot_tools
+        # depot_tools contains utilities like gclient and autoninja
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$(pwd)/depot_tools" >> $GITHUB_PATH # Add depot_tools to PATH for subsequent steps
+
+      - name: Ensure Chromium is downloaded and unpacked
+        # These scripts download the core Chromium source and additional files
+        # into the 'build/src' directory relative to the helium-chromium repo.
+        run: |
+          mkdir -p build/download_cache
+          ./utils/downloads.py retrieve -c build/download_cache -i downloads.ini
+          ./utils/downloads.py retrieve -c build/download_cache -i extras.ini
+          ./utils/downloads.py unpack -c build/download_cache -i downloads.ini -- build/src
+          ./utils/downloads.py unpack -c build/download_cache -i extras.ini -- build/src
+
+      - name: Prune binaries
+        # Removes unnecessary binaries from the Chromium source tree
+        run: ./utils/prune_binaries.py build/src pruning.list
+
+      - name: Apply patches
+        # Applies helium-chromium specific patches to the Chromium source
+        run: ./utils/patches.py apply build/src patches
+
+      - name: Substitute domains and names
+        # Modifies the source to remove Google-specific domain and name references
+        run: |
+          ./utils/domain_substitution.py apply -r domain_regex.list -f domain_substitution.list -c build/domsubcache.tar.gz build/src
+          python3 ./utils/name_substitution.py --sub -t build/src
+
+      - name: Build GN (if not using depot_tools' GN)
+        # Bootstraps the GN build system if not already available via depot_tools
+        # We navigate into build/src for this step and then back.
+        run: |
+          mkdir -p build/src/out/Default
+          cd build/src
+          # Use nproc to determine the number of available CPU cores for parallel compilation
+          ./tools/gn/bootstrap/bootstrap.py --skip-generate-buildfiles -j$(nproc) -o out/Default/
+          cd - # Go back to the helium-chromium root directory
+
+      - name: Configure and Invoke the Build
+        # This is the main compilation step using GN and Ninja.
+        # We navigate into build/src for this step and then back.
+        run: |
+          mkdir -p build/src/out/Default
+          # Copy the default flags.gn to args.gn for the build configuration.
+          cp flags.gn build/src/out/Default/args.gn
+          cd build/src
+          # Generate Ninja build files based on GN configuration
+          ./out/Default/gn gen out/Default --fail-on-unused-args
+          # Start the actual compilation using autoninja (which uses Ninja efficiently)
+          autoninja -C out/Default chrome chromedriver chrome_sandbox
+          cd - # Go back to the helium-chromium root directory
+
+      - name: Upload Built Artifacts (Optional)
+        uses: actions/upload-artifact@v4 # Action to upload build output
+        with:
+          name: helium-chromium-build
+          path: build/src/out/Default/ # Path to the compiled binaries
+          retention-days: 7 # Keep artifacts for 7 days
